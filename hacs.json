@@ -1,0 +1,5 @@
+{
+    "name": "Zhiyun Light (BLE)",
+    "render_readme": true,
+    "homeassistant": "2026.3.1"
+}
