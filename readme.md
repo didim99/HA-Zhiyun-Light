@@ -7,8 +7,10 @@ using **Home Assistant 2026.3.1**.
 
 ## Installation
 
-* Install the integration to Home Assistant: copy the contents of 
-`custom_components/zhiyun_ble/` to `<your config dir>/custom_components/zhiyun_ble/`.
+* Install the integration to Home Assistant:
+  * Option 1: add via HACS with [custom repository](https://www.hacs.xyz/docs/faq/custom_repositories/)
+  * Option 2: copy the contents of `custom_components/zhiyun_ble/`
+    to `<your config dir>/custom_components/zhiyun_ble/`.
 * Restart Home Assistant
 * Available devices will be automatically configured via Bluetooth discovery
 
