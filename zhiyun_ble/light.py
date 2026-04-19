@@ -11,6 +11,8 @@ from homeassistant.components.light import (
     LightEntity,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -61,10 +63,20 @@ class ZhiyunLight(LightEntity):
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(self._device.register_callback(self._on_state_update))
+        self.async_on_remove(
+            self._device.register_availability_callback(self._on_availability_changed)
+        )
+        self._attr_available = self._device.available
 
     @callback
     def _on_state_update(self, state: ZhiyunState) -> None:
         self._apply_state(state)
+        self._sync_device_registry(state)
+        self.async_write_ha_state()
+
+    @callback
+    def _on_availability_changed(self, available: bool) -> None:
+        self._attr_available = available
         self.async_write_ha_state()
 
     @callback
@@ -72,6 +84,23 @@ class ZhiyunLight(LightEntity):
         self._attr_is_on = state.is_on
         self._attr_brightness = _pct_to_ha(state.brightness)
         self._attr_color_temp_kelvin = state.color_temp_kelvin
+
+    @callback
+    def _sync_device_registry(self, state: ZhiyunState) -> None:
+        """Propagate firmware/model data learned post-setup into the device registry."""
+        if not state.firmware and not state.model_name:
+            return
+        registry = dr.async_get(self.hass)
+        entry = registry.async_get_device(identifiers={(DOMAIN, self._device.address)})
+        if entry is None:
+            return
+        changes: dict[str, str] = {}
+        if state.firmware and entry.sw_version != state.firmware:
+            changes["sw_version"] = state.firmware
+        if state.model_name and entry.model != state.model_name:
+            changes["model"] = state.model_name
+        if changes:
+            registry.async_update_device(entry.id, **changes)
 
     # ---------------------------------------------------------------------
     # Commands
@@ -98,12 +127,6 @@ class ZhiyunLight(LightEntity):
         except ZhiyunError as err:
             raise _to_ha_error(err) from err
 
-    @property
-    def available(self) -> bool:
-        # Availability tracks advertisement presence; HA's bluetooth integration
-        # invalidates the BLEDevice when the adapter stops hearing the light.
-        return True
-
 
 def _ha_to_pct(ha_brightness: int) -> float:
     return max(0.0, min(100.0, ha_brightness / _HA_BRIGHTNESS_MAX * 100.0))
@@ -113,13 +136,6 @@ def _pct_to_ha(pct: float) -> int:
     return int(round(max(0.0, min(100.0, pct)) / 100.0 * _HA_BRIGHTNESS_MAX))
 
 
-def _to_ha_error(err: ZhiyunError) -> Exception:
-    """Convert the library exception to a HA-friendly error.
-
-    Kept as a single hook so future subclasses can map to more specific
-    HomeAssistantError / ServiceValidationError types without touching
-    every call site.
-    """
-    from homeassistant.exceptions import HomeAssistantError
-
+def _to_ha_error(err: ZhiyunError) -> HomeAssistantError:
+    """Map library exceptions to HA-facing errors at a single choke point."""
     return HomeAssistantError(str(err))

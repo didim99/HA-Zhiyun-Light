@@ -9,10 +9,11 @@
   "iot_class": "local_polling",
   "requirements": ["bleak-retry-connector>=3.5.0"],
   "bluetooth": [
-    { "service_uuid": "0000fee9-0000-1000-8000-00805f9b34fb", "local_name": "PL*" },
-    { "service_uuid": "0000fee9-0000-1000-8000-00805f9b34fb", "local_name": "PLG*" },
-    { "service_uuid": "0000fee9-0000-1000-8000-00805f9b34fb", "local_name": "PLB*" },
-    { "service_uuid": "0000fee9-0000-1000-8000-00805f9b34fb", "local_name": "PLX*" },
-    { "service_uuid": "0000fee9-0000-1000-8000-00805f9b34fb", "local_name": "PLM*" }
+    { "local_name": "PL0*" },
+    { "local_name": "PL1*" },
+    { "local_name": "PLB*" },
+    { "local_name": "PLG*" },
+    { "local_name": "PLM*" },
+    { "local_name": "PLX*" }
   ]
 }

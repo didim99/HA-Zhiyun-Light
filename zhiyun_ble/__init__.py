@@ -36,21 +36,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZhiyunConfigEntry) -> bo
         raise ConfigEntryNotReady(f"Zhiyun device {address} not in range")
 
     device = ZhiyunDevice(ble_device, entry.title)
+    device.set_available(bluetooth.async_address_present(hass, address, connectable=True))
     entry.runtime_data = ZhiyunRuntimeData(device=device)
 
     @callback
-    def _refresh_ble_device(
+    def _on_advertisement(
         service_info: BluetoothServiceInfoBleak,
         _change: BluetoothChange,
     ) -> None:
         device.update_ble_device(service_info.device)
 
+    @callback
+    def _on_unavailable(_service_info: BluetoothServiceInfoBleak) -> None:
+        device.set_available(False)
+
     entry.async_on_unload(
         bluetooth.async_register_callback(
             hass,
-            _refresh_ble_device,
+            _on_advertisement,
             BluetoothCallbackMatcher(address=address, connectable=True),
             BluetoothScanningMode.PASSIVE,
+        )
+    )
+    entry.async_on_unload(
+        bluetooth.async_track_unavailable(
+            hass, _on_unavailable, address, connectable=True
         )
     )
     entry.async_on_unload(device.async_disconnect)

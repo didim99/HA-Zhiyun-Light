@@ -14,8 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Final
 
+from bleak import BleakClient, BleakError
 from bleak.backends.characteristic import BleakGATTCharacteristic
-from bleak.backends.client import BaseBleakClient  # type: ignore[import-not-found]
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import (
     BleakClientWithServiceCache,
@@ -59,6 +59,7 @@ class ZhiyunState:
 
 
 StateCallback = Callable[[ZhiyunState], None]
+AvailabilityCallback = Callable[[bool], None]
 
 
 class ZhiyunDevice:
@@ -80,15 +81,16 @@ class ZhiyunDevice:
         self._name = name
         self._idle_disconnect_after = idle_disconnect_after
 
-        self._client: BaseBleakClient | None = None
+        self._client: BleakClient | None = None
         self._write_char: BleakGATTCharacteristic | None = None
-        self._notify_char: BleakGATTCharacteristic | None = None
 
         self._lock = asyncio.Lock()
         self._sequence = 0
         self._disconnect_timer: asyncio.Task[None] | None = None
-        self._callbacks: list[StateCallback] = []
+        self._state_callbacks: list[StateCallback] = []
+        self._availability_callbacks: list[AvailabilityCallback] = []
 
+        self._available: bool = True
         self._last_nonzero_brightness: float = 50.0
         code, friendly = p.resolve_model(name)
         self._state = ZhiyunState(model_code=code, model_name=friendly)
@@ -109,6 +111,10 @@ class ZhiyunDevice:
     def state(self) -> ZhiyunState:
         return self._state
 
+    @property
+    def available(self) -> bool:
+        return self._available
+
     def update_ble_device(self, ble_device: BLEDevice) -> None:
         """Swap the underlying `BLEDevice` when a fresh advert arrives.
 
@@ -117,17 +123,25 @@ class ZhiyunDevice:
         improves reconnect reliability when the adapter roams between proxies.
         """
         self._ble_device = ble_device
+        self.set_available(True)
+
+    def set_available(self, available: bool) -> None:
+        if self._available == available:
+            return
+        self._available = available
+        for callback in tuple(self._availability_callbacks):
+            try:
+                callback(available)
+            except Exception:  # noqa: BLE001 — callbacks are user code
+                _LOGGER.exception("%s: availability callback raised", self._name)
 
     def register_callback(self, callback: StateCallback) -> Callable[[], None]:
-        self._callbacks.append(callback)
+        return _subscribe(self._state_callbacks, callback)
 
-        def _unsubscribe() -> None:
-            try:
-                self._callbacks.remove(callback)
-            except ValueError:
-                pass
-
-        return _unsubscribe
+    def register_availability_callback(
+        self, callback: AvailabilityCallback
+    ) -> Callable[[], None]:
+        return _subscribe(self._availability_callbacks, callback)
 
     async def async_turn_on(
         self,
@@ -203,8 +217,10 @@ class ZhiyunDevice:
         try:
             async with asyncio.timeout(_WRITE_TIMEOUT):
                 await self._client.write_gatt_char(self._write_char, frame, response=False)
-        except TimeoutError as err:
-            raise ZhiyunConnectionError(f"write timeout on {self._name}") from err
+        except (TimeoutError, BleakError, OSError) as err:
+            # Link is likely dead; drop cached client so the next call reconnects.
+            await self._force_disconnect()
+            raise ZhiyunConnectionError(f"write failed on {self._name}: {err}") from err
 
     def _next_sequence(self) -> int:
         seq = self._sequence
@@ -236,6 +252,8 @@ class ZhiyunDevice:
             raise ZhiyunConnectionError(f"{self._name} not in range") from err
         except TimeoutError as err:
             raise ZhiyunConnectionError(f"{self._name} connect timeout") from err
+        except (BleakError, OSError) as err:
+            raise ZhiyunConnectionError(f"{self._name} connect failed: {err}") from err
 
         service = client.services.get_service(p.SERVICE_UUID)
         if service is None:
@@ -252,7 +270,6 @@ class ZhiyunDevice:
 
         self._client = client
         self._write_char = write_char
-        self._notify_char = notify_char
 
         await self._run_init_handshake()
 
@@ -277,11 +294,23 @@ class ZhiyunDevice:
                 return
             await asyncio.sleep(_INIT_STEP_DELAY)
 
-    def _on_unexpected_disconnect(self, _client: BaseBleakClient) -> None:
+    def _on_unexpected_disconnect(self, _client: BleakClient) -> None:
         _LOGGER.debug("%s: GATT link dropped", self._name)
         self._client = None
         self._write_char = None
-        self._notify_char = None
+
+    async def _force_disconnect(self) -> None:
+        """Best-effort teardown after a write failure. Safe to call if already dead."""
+        client = self._client
+        self._client = None
+        self._write_char = None
+        if client is None:
+            return
+        try:
+            async with asyncio.timeout(_CONNECT_TIMEOUT):
+                await client.disconnect()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("%s: force disconnect error: %s", self._name, err)
 
     def _arm_idle_disconnect(self) -> None:
         self._cancel_idle_disconnect()
@@ -304,7 +333,6 @@ class ZhiyunDevice:
         client = self._client
         self._client = None
         self._write_char = None
-        self._notify_char = None
         if client is None or not client.is_connected:
             return
         try:
@@ -348,8 +376,20 @@ class ZhiyunDevice:
         if new_state == self._state:
             return
         self._state = new_state
-        for callback in tuple(self._callbacks):
+        for callback in tuple(self._state_callbacks):
             try:
                 callback(new_state)
             except Exception:  # noqa: BLE001 — callbacks are user code
                 _LOGGER.exception("%s: state callback raised", self._name)
+
+
+def _subscribe[T](registry: list[T], callback: T) -> Callable[[], None]:
+    registry.append(callback)
+
+    def _unsubscribe() -> None:
+        try:
+            registry.remove(callback)
+        except ValueError:
+            pass
+
+    return _unsubscribe
